@@ -1,0 +1,341 @@
+name: 🚀🚀 Deploy to Production via SSH
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - prod
+      - production
+
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to deploy"
+        required: true
+        default: "master"
+        type: choice
+        options:
+          - main
+          - master
+          - prod
+          - production
+
+concurrency:
+  group: prod-deploy
+  cancel-in-progress: true
+
+# Infisical config used in this workflow — INFISICAL_SSH_PATH,
+# INFISICAL_DOCKERHUB_PATH and INFISICAL_APP_PATH are hardcoded literals below;
+# none of this is sensitive, only the secret values fetched from these
+# paths/projects are:
+#   $INFISICAL_SERVER_PROJECT_ID      -> Infisical project holding SSH/Docker Hub secrets
+#   $INFISICAL_APPLICATION_PROJECT_ID -> Infisical project holding app secrets
+#   $INFISICAL_SSH_PATH               -> SSH host credentials
+#   $INFISICAL_DOCKERHUB_PATH         -> Docker Hub credentials
+#   $INFISICAL_APP_PATH               -> application secrets
+#
+# Every secret under INFISICAL_APP_PATH is stored with a "SMART_VIEW_APP_" prefix
+# (e.g. SMART_VIEW_APP_APP_URL). The server .env is written with those prefixed names —
+# docker-compose.deploy.yml maps them to the unprefixed container variables.
+env:
+  INFISICAL_ENV: prod
+  INFISICAL_SERVER_PROJECT_ID: ${{ secrets.INFISICAL_SERVER_PROJECT_ID }}
+  INFISICAL_APPLICATION_PROJECT_ID: ${{ secrets.INFISICAL_APPLICATION_PROJECT_ID }}
+  INFISICAL_SSH_PATH: "/ssh/contabo"
+  INFISICAL_DOCKERHUB_PATH: "/docker-hub/smart-view-app"
+  INFISICAL_APP_PATH: "/smart-view-app/app"
+  # Not Infisical-specific — also used for Docker image tags and deploy target paths below
+  BASE_APP_NAME: "smart-view-app"
+  ENV_PREFIX: "SMART_VIEW_APP_"
+
+jobs:
+  deploy-to-prod:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      ENVIRONMENT: "prod"
+      DOCKER_USERNAME: "kingsleyjmtech"
+      APP_DOMAIN: "smart-view-app.prod.kingsleyjmtech.com"
+
+    steps:
+      - name: 📖 Checkout repository
+        uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref }}
+
+      # Validate branch for workflow_dispatch
+      - name: 🔎 Validate Branch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          INPUT_BRANCH: ${{ github.event.inputs.branch }}
+        run: |
+          ALLOWED_BRANCHES=("main" "master" "prod" "production")
+          case " ${ALLOWED_BRANCHES[*]} " in
+            *" ${INPUT_BRANCH} "*) ;;
+            *)
+              echo "Error: Branch '${INPUT_BRANCH}' is not allowed for manual deployment."
+              exit 1
+              ;;
+          esac
+
+      - name: 🔧 Install Infisical CLI
+        run: |
+          curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | sudo -E bash
+          sudo apt-get update && sudo apt-get install -y infisical
+
+      - name: 🔐 Authenticate with Infisical
+        env:
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        run: |
+          # Capture the token without echoing it, then mask immediately
+          INFISICAL_TOKEN=$(infisical login \
+            --method=universal-auth \
+            --client-id="$INFISICAL_CLIENT_ID" \
+            --client-secret="$INFISICAL_CLIENT_SECRET" \
+            --silent --plain 2>/dev/null)
+          echo "::add-mask::$INFISICAL_TOKEN"
+          echo "INFISICAL_TOKEN=$INFISICAL_TOKEN" >> "$GITHUB_ENV"
+
+      # Read SSH credentials from Infisical
+      - name: 🔑 Read SSH credentials from Infisical
+        run: |
+          SSH_HOST=$(infisical secrets get SSH_HOST --path="$INFISICAL_SSH_PATH" --env="$INFISICAL_ENV" --projectId="$INFISICAL_SERVER_PROJECT_ID" --plain)
+          SSH_USERNAME=$(infisical secrets get SSH_USERNAME --path="$INFISICAL_SSH_PATH" --env="$INFISICAL_ENV" --projectId="$INFISICAL_SERVER_PROJECT_ID" --plain)
+          SSH_PASSWORD=$(infisical secrets get SSH_PASSWORD --path="$INFISICAL_SSH_PATH" --env="$INFISICAL_ENV" --projectId="$INFISICAL_SERVER_PROJECT_ID" --plain)
+
+          # Mask ALL sensitive values; pass via env, never via step outputs
+          echo "::add-mask::$SSH_HOST"
+          echo "::add-mask::$SSH_USERNAME"
+          echo "::add-mask::$SSH_PASSWORD"
+          {
+            echo "SSH_HOST=$SSH_HOST"
+            echo "SSH_USERNAME=$SSH_USERNAME"
+            echo "SSH_PASSWORD=$SSH_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      # Read Docker Hub credentials from Infisical
+      - name: 🐳 Read Docker Hub credentials from Infisical
+        run: |
+          DOCKERHUB_USERNAME=$(infisical secrets get DOCKERHUB_USERNAME --path="$INFISICAL_DOCKERHUB_PATH" --env="$INFISICAL_ENV" --projectId="$INFISICAL_SERVER_PROJECT_ID" --plain)
+          DOCKERHUB_TOKEN=$(infisical secrets get DOCKERHUB_TOKEN --path="$INFISICAL_DOCKERHUB_PATH" --env="$INFISICAL_ENV" --projectId="$INFISICAL_SERVER_PROJECT_ID" --plain)
+          echo "::add-mask::$DOCKERHUB_USERNAME"
+          echo "::add-mask::$DOCKERHUB_TOKEN"
+          {
+            echo "DOCKERHUB_USERNAME=$DOCKERHUB_USERNAME"
+            echo "DOCKERHUB_PASSWORD=$DOCKERHUB_TOKEN"
+          } >> "$GITHUB_ENV"
+
+      # Calculate version based on run number
+      - name: 🏷️ Set version
+        id: version
+        run: |
+          APP_VERSION="v$(( (${{ github.run_number }} / 100) + 1 )).$(( ((${{ github.run_number }} / 10) % 10) + 1 )).$(( (${{ github.run_number }} % 10) + 1 ))"
+          echo "DOCKER_IMAGE_TAG=prod-${APP_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Version: prod-$APP_VERSION"
+          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+
+      # Log in to Docker Hub
+      - name: 🔐 Log in to Docker Hub
+        uses: docker/login-action@v4.6.0
+        with:
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ env.DOCKERHUB_PASSWORD }}
+
+      # ============================================
+      # Frontend build (Vite) — runs on the runner so the image only ships
+      # compiled assets. VITE_* values are public (they end up in the JS
+      # bundle); they come from the committed .env.example with the
+      # SMART_VIEW_APP_-prefixed Infisical values substituted for placeholders.
+      # ============================================
+      - name: 🟢 Set up Node.js
+        uses: actions/setup-node@v6.0.0
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: 📥 Export build-time values from Infisical
+        run: |
+          infisical export \
+            --path="$INFISICAL_APP_PATH" \
+            --env="$INFISICAL_ENV" \
+            --projectId="$INFISICAL_APPLICATION_PROJECT_ID" \
+            --format=dotenv > .env.app
+
+          # Unprefixed .env for Vite: template lines, with DEV_*/PROD_*
+          # placeholders replaced by the matching prefixed Infisical value.
+          : > .env.build
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]]; then
+              key="${BASH_REMATCH[1]}"
+              value="${BASH_REMATCH[2]}"
+              if [[ "$value" =~ ^\"?(DEV|PROD|STAGING)_[A-Z0-9_]+\"?$ ]]; then
+                value=$(grep -E "^${ENV_PREFIX}${key}=" .env.app | tail -n 1 | cut -d= -f2- || true)
+              fi
+              echo "${key}=${value}" >> .env.build
+            fi
+          done < .env.example
+          sed -i "s/^APP_VERSION=.*/APP_VERSION=$APP_VERSION/" .env.build
+          mv .env.build .env
+          rm -f .env.app
+
+      - name: 🏗️ Build frontend assets
+        run: |
+          npm ci
+          npm run build
+          rm -f .env
+
+      # Build and push Docker image
+      - name: 🐳 Build and push Docker images
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.DOCKER_USERNAME }}/${{ env.BASE_APP_NAME }}-${{ env.ENVIRONMENT }}:${{ steps.version.outputs.DOCKER_IMAGE_TAG }}
+
+      # ============================================
+      # PHASE 1: Export app secrets ONLY (for server - AFTER image push)
+      # ============================================
+      - name: 📥 Export app secrets from Infisical
+        run: |
+          infisical export \
+            --path="$INFISICAL_APP_PATH" \
+            --env="$INFISICAL_ENV" \
+            --projectId="$INFISICAL_APPLICATION_PROJECT_ID" \
+            --format=dotenv > .env.app
+
+      # Create .env for server (app env + version/deploy info)
+      - name: 📝 Create .env file for server
+        env:
+          DOCKER_IMAGE_TAG: ${{ steps.version.outputs.DOCKER_IMAGE_TAG }}
+        run: |
+          # Copy original file to avoid destructive operations
+          cp .env.app .env.app.work
+
+          # Remove any deploy-managed vars from the app env (fail-safe)
+          for key in APP_VERSION DOCKER_IMAGE_TAG DOCKER_IMAGE_NAME DOCKER_CONTAINER_NAME; do
+            grep -v "^${ENV_PREFIX}${key}=" .env.app.work > .env.app.tmp || true
+            mv .env.app.tmp .env.app.work
+          done
+
+          # Per-environment non-secret values (Infisical wins if it sets them)
+          grep -q "^${ENV_PREFIX}APP_ENV=" .env.app.work || echo "${ENV_PREFIX}APP_ENV=production" >> .env.app.work
+
+          # Add our dynamically generated values
+          {
+            echo "${ENV_PREFIX}APP_VERSION=${DOCKER_IMAGE_TAG}"
+            echo "${ENV_PREFIX}DOCKER_IMAGE_TAG=${DOCKER_IMAGE_TAG}"
+            echo "${ENV_PREFIX}DOCKER_IMAGE_NAME=${DOCKER_USERNAME}/${BASE_APP_NAME}-${ENVIRONMENT}"
+            echo "${ENV_PREFIX}DOCKER_CONTAINER_NAME=${BASE_APP_NAME}-${ENVIRONMENT}"
+          } >> .env.app.work
+          grep -q "^${ENV_PREFIX}APP_DOMAIN=" .env.app.work || echo "${ENV_PREFIX}APP_DOMAIN=${APP_DOMAIN}" >> .env.app.work
+          grep -q "^${ENV_PREFIX}DOCKER_STORAGE_VOLUME_PATH=" .env.app.work || \
+            echo "${ENV_PREFIX}DOCKER_STORAGE_VOLUME_PATH=/home/docker/${BASE_APP_NAME}-${ENVIRONMENT}/storage" >> .env.app.work
+
+          # This .env goes to the server only
+          mv .env.app.work .env
+
+          # Clean up temp files
+          rm -f .env.app .env.app.tmp
+
+          echo "✅ Server .env file created (contents NOT logged for security)"
+
+      # Verify files exist before copying
+      - name: 🔍 Verify files before copy
+        run: |
+          echo "=== Checking required files ==="
+          for f in .env docker-compose.deploy.yml scripts/blue-green-deploy.sh scripts/audit-container-capabilities.sh scripts/colors.sh; do
+            if [ -f "$f" ]; then
+              echo "✅ $f exists"
+            else
+              echo "❌ $f NOT found!"
+              exit 1
+            fi
+          done
+          echo "=== All files verified ==="
+
+      # Copy files to the production server (docker-compose, .env and deploy scripts)
+      - name: 📁 Copy files to Production Server
+        uses: appleboy/scp-action@v1.0.0
+        with:
+          host: ${{ env.SSH_HOST }}
+          username: ${{ env.SSH_USERNAME }}
+          password: ${{ env.SSH_PASSWORD }}
+          source: ".env,docker-compose.deploy.yml,scripts/blue-green-deploy.sh,scripts/audit-container-capabilities.sh,scripts/colors.sh"
+          target: "/home/docker/${{ env.BASE_APP_NAME }}-${{ env.ENVIRONMENT }}"
+          strip_components: 0
+          # NEVER set rm: true here — it removes the target directory before
+          # upload, and that directory holds the bind-mounted storage/ of the
+          # RUNNING containers plus the blue-green state file. The uploaded
+          # files are overwritten in place, so no cleanup is needed.
+
+      # Delete .env files from runner after successful copy
+      - name: 🧹 Delete .env files from runner
+        if: always()
+        run: |
+          rm -f .env .env.app .env.app.work .env.app.tmp .env.build 2>/dev/null || true
+          echo "✅ Server .env files deleted from runner"
+
+      # SSH and Deploy to Production Server
+      - name: 🚀 Deploy to Production Server via SSH
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ env.SSH_HOST }}
+          username: ${{ env.SSH_USERNAME }}
+          password: ${{ env.SSH_PASSWORD }}
+          script: |
+            set -e
+
+            # Move compose.yml into place
+            cd /home/docker/${{ env.BASE_APP_NAME }}-${{ env.ENVIRONMENT }}
+            mv docker-compose.deploy.yml compose.yml
+
+            # Zero-downtime blue-green deploy: brings the idle color up on the
+            # new image, runs the release steps, waits for its health check,
+            # then flips the Traefik file-provider route. The previously live
+            # color keeps running on the old image as an instant rollback
+            # target — `bash scripts/blue-green-deploy.sh rollback`.
+            echo "=== Pre-deploy state ==="
+            bash scripts/blue-green-deploy.sh status || true
+            bash scripts/blue-green-deploy.sh deploy
+            echo "=== Post-deploy state ==="
+            bash scripts/blue-green-deploy.sh status || true
+
+      # Post-deploy hardening gate: the release is already live at this point,
+      # but the pipeline FAILS if the running containers are not hardened
+      # (cap_drop ALL, nothing privileged).
+      - name: 🛡️ Verify container hardening on Production Server
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ env.SSH_HOST }}
+          username: ${{ env.SSH_USERNAME }}
+          password: ${{ env.SSH_PASSWORD }}
+          script: |
+            cd /home/docker/${{ env.BASE_APP_NAME }}-${{ env.ENVIRONMENT }}
+            FORCE_COLOR=1 bash scripts/audit-container-capabilities.sh --project-name ${{ env.BASE_APP_NAME }}-${{ env.ENVIRONMENT }} -f compose.yml
+
+      # Remove old Docker images (keeps the two newest: live + rollback slot)
+      - name: 🧹 Remove old Docker images on Production Server
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ env.SSH_HOST }}
+          username: ${{ env.SSH_USERNAME }}
+          password: ${{ env.SSH_PASSWORD }}
+          script: |
+            images_to_remove=$(docker images ${{ env.DOCKER_USERNAME }}/${{ env.BASE_APP_NAME }}-${{ env.ENVIRONMENT }} --format "{{.ID}}" | tail -n +3)
+            if [ -n "$images_to_remove" ]; then
+              docker rmi $images_to_remove || true
+            fi
+
+      # Create and push git tag
+      - name: 🏷️ Create and push git tag
+        env:
+          DOCKER_IMAGE_TAG: ${{ steps.version.outputs.DOCKER_IMAGE_TAG }}
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$DOCKER_IMAGE_TAG"
+          git push origin "$DOCKER_IMAGE_TAG"

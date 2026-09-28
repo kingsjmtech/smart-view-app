@@ -1,0 +1,199 @@
+# ==============================================================================
+# docker-compose.deploy.yml — production/staging stack for smart-view-app.
+#
+# Uploaded to /home/docker/smart-view-app-<env>/ by .github/workflows/deploy-ssh-*.yml
+# (renamed to compose.yml there) and driven by scripts/blue-green-deploy.sh.
+# All values come from the server .env written by the workflow; every key is
+# SMART_VIEW_APP_-prefixed:
+#   SMART_VIEW_APP_DOCKER_IMAGE_NAME        kingsleyjmtech/smart-view-app-<env>
+#   SMART_VIEW_APP_DOCKER_IMAGE_TAG         <env>-vX.Y.Z (the release being deployed)
+#   SMART_VIEW_APP_DOCKER_IMAGE_TAG_BLUE    per-color image pin (default DOCKER_IMAGE_TAG)
+#   SMART_VIEW_APP_DOCKER_IMAGE_TAG_GREEN   per-color image pin (same default)
+#   SMART_VIEW_APP_DOCKER_CONTAINER_NAME    smart-view-app-<env>
+#   SMART_VIEW_APP_APP_DOMAIN               public hostname routed by Traefik
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# x-app-security: capabilities for the app image (webdevops/php-nginx).
+# supervisord starts as root and spawns nginx + php-fpm, which drop to the
+# `application` user themselves:
+#   CHOWN / DAC_OVERRIDE / FOWNER / FSETID → fix ownership/modes of storage/,
+#     bootstrap/cache and log files
+#   SETUID / SETGID                        → nginx + php-fpm workers switch user
+#   NET_BIND_SERVICE                       → nginx binds :80 as root
+#   KILL                                   → supervisord/php-fpm master signal
+#                                            children running as another uid
+# Everything else Docker grants by default is dropped.
+# ------------------------------------------------------------------------------
+x-app-security: &app-security
+  cap_drop:
+    - ALL
+  cap_add:
+    - CHOWN
+    - DAC_OVERRIDE
+    - FOWNER
+    - FSETID
+    - SETGID
+    - SETUID
+    - NET_BIND_SERVICE
+    - KILL
+  security_opt:
+    - no-new-privileges:true
+
+x-app-env: &app-env
+  # Every key comes from the server .env as SMART_VIEW_APP_<KEY> (Infisical
+  # /smart-view-app/app plus the non-secret template defaults).
+  APP_NAME: "${SMART_VIEW_APP_APP_NAME:-Smart View App}"
+  APP_ENV: "${SMART_VIEW_APP_APP_ENV:-production}"
+  APP_KEY: "${SMART_VIEW_APP_APP_KEY:-}"
+  APP_DEBUG: "${SMART_VIEW_APP_APP_DEBUG:-false}"
+  APP_TIMEZONE: "${SMART_VIEW_APP_APP_TIMEZONE:-UTC}"
+  APP_URL: "${SMART_VIEW_APP_APP_URL:-http://localhost}"
+  APP_API_KEY: "${SMART_VIEW_APP_APP_API_KEY:-}"
+  APP_API_KEY_ACTIVE: "${SMART_VIEW_APP_APP_API_KEY_ACTIVE:-false}"
+  APP_LOCALE: "${SMART_VIEW_APP_APP_LOCALE:-en}"
+  APP_FALLBACK_LOCALE: "${SMART_VIEW_APP_APP_FALLBACK_LOCALE:-en}"
+  APP_FAKER_LOCALE: "${SMART_VIEW_APP_APP_FAKER_LOCALE:-en_US}"
+  APP_MAINTENANCE_DRIVER: "${SMART_VIEW_APP_APP_MAINTENANCE_DRIVER:-file}"
+  APP_MAINTENANCE_STORE: "${SMART_VIEW_APP_APP_MAINTENANCE_STORE:-database}"
+  BCRYPT_ROUNDS: "${SMART_VIEW_APP_BCRYPT_ROUNDS:-12}"
+  LOG_CHANNEL: "${SMART_VIEW_APP_LOG_CHANNEL:-stack}"
+  LOG_STACK: "${SMART_VIEW_APP_LOG_STACK:-daily}"
+  LOG_DEPRECATIONS_CHANNEL: "${SMART_VIEW_APP_LOG_DEPRECATIONS_CHANNEL:-null}"
+  LOG_LEVEL: "${SMART_VIEW_APP_LOG_LEVEL:-error}"
+  DB_CONNECTION: "${SMART_VIEW_APP_DB_CONNECTION:-sqlite}"
+  TELESCOPE_ENABLED: "${SMART_VIEW_APP_TELESCOPE_ENABLED:-false}"
+  TELESCOPE_DB_CONNECTION: "${SMART_VIEW_APP_TELESCOPE_DB_CONNECTION:-sqlite}"
+  TELESCOPE_USERS: "${SMART_VIEW_APP_TELESCOPE_USERS:-admin@admin.com}"
+  FILAMENT_USERS: "${SMART_VIEW_APP_FILAMENT_USERS:-admin@admin.com}"
+  ADMIN_USER_EMAIL: "${SMART_VIEW_APP_ADMIN_USER_EMAIL:-admin@admin.com}"
+  SESSION_DRIVER: "${SMART_VIEW_APP_SESSION_DRIVER:-database}"
+  SESSION_LIFETIME: "${SMART_VIEW_APP_SESSION_LIFETIME:-120}"
+  SESSION_ENCRYPT: "${SMART_VIEW_APP_SESSION_ENCRYPT:-false}"
+  SESSION_PATH: "${SMART_VIEW_APP_SESSION_PATH:-/}"
+  SESSION_DOMAIN: "${SMART_VIEW_APP_SESSION_DOMAIN:-null}"
+  BROADCAST_CONNECTION: "${SMART_VIEW_APP_BROADCAST_CONNECTION:-log}"
+  FILESYSTEM_DISK: "${SMART_VIEW_APP_FILESYSTEM_DISK:-local}"
+  QUEUE_CONNECTION: "${SMART_VIEW_APP_QUEUE_CONNECTION:-database}"
+  CACHE_STORE: "${SMART_VIEW_APP_CACHE_STORE:-database}"
+  CACHE_PREFIX: "${SMART_VIEW_APP_CACHE_PREFIX:-}"
+  MEMCACHED_HOST: "${SMART_VIEW_APP_MEMCACHED_HOST:-127.0.0.1}"
+  REDIS_CLIENT: "${SMART_VIEW_APP_REDIS_CLIENT:-phpredis}"
+  REDIS_HOST: "${SMART_VIEW_APP_REDIS_HOST:-127.0.0.1}"
+  REDIS_PASSWORD: "${SMART_VIEW_APP_REDIS_PASSWORD:-null}"
+  REDIS_PORT: "${SMART_VIEW_APP_REDIS_PORT:-6379}"
+  MAIL_MAILER: "${SMART_VIEW_APP_MAIL_MAILER:-log}"
+  MAIL_HOST: "${SMART_VIEW_APP_MAIL_HOST:-127.0.0.1}"
+  MAIL_PORT: "${SMART_VIEW_APP_MAIL_PORT:-2525}"
+  MAIL_USERNAME: "${SMART_VIEW_APP_MAIL_USERNAME:-null}"
+  MAIL_PASSWORD: "${SMART_VIEW_APP_MAIL_PASSWORD:-null}"
+  MAIL_ENCRYPTION: "${SMART_VIEW_APP_MAIL_ENCRYPTION:-null}"
+  MAIL_FROM_ADDRESS: "${SMART_VIEW_APP_MAIL_FROM_ADDRESS:-hello@example.com}"
+  MAIL_FROM_NAME: "${SMART_VIEW_APP_MAIL_FROM_NAME:-}"
+  AWS_ACCESS_KEY_ID: "${SMART_VIEW_APP_AWS_ACCESS_KEY_ID:-}"
+  AWS_SECRET_ACCESS_KEY: "${SMART_VIEW_APP_AWS_SECRET_ACCESS_KEY:-}"
+  AWS_DEFAULT_REGION: "${SMART_VIEW_APP_AWS_DEFAULT_REGION:-us-east-1}"
+  AWS_BUCKET: "${SMART_VIEW_APP_AWS_BUCKET:-}"
+  AWS_USE_PATH_STYLE_ENDPOINT: "${SMART_VIEW_APP_AWS_USE_PATH_STYLE_ENDPOINT:-false}"
+  APP_VERSION: "${SMART_VIEW_APP_APP_VERSION:-}"
+  DB_DATABASE: "${SMART_VIEW_APP_DB_DATABASE:-/var/www/html/storage/database.sqlite}"
+
+services:
+  # --------------------------------------------------------------------------
+  # web-blue / web-green — identical app containers. Live traffic is routed by
+  # the Traefik file-provider route that scripts/blue-green-deploy.sh writes to
+  # /home/docker/traefik/dynamic/<container>.yml (priority 10000). The labels
+  # below are a low-priority (1) fallback router shared by both colors, so the
+  # host still resolves if that file is missing. SMART_VIEW_APP_DOCKER_IMAGE_TAG_<COLOR>
+  # pins each slot's version independently — the idle slot keeps its old
+  # image so `blue-green-deploy.sh rollback` restores the previous release.
+  # --------------------------------------------------------------------------
+  web-blue:
+    <<: *app-security
+    image: ${SMART_VIEW_APP_DOCKER_IMAGE_NAME}:${SMART_VIEW_APP_DOCKER_IMAGE_TAG_BLUE:-${SMART_VIEW_APP_DOCKER_IMAGE_TAG}}
+    container_name: ${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-web-blue
+    restart: unless-stopped
+    stop_grace_period: 30s
+    volumes:
+      - ${SMART_VIEW_APP_DOCKER_STORAGE_VOLUME_PATH}:/var/www/html/storage:rw
+    networks:
+      - proxy-network
+    environment: *app-env
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-H", "Host: ${SMART_VIEW_APP_APP_DOMAIN}", "http://localhost:80/up"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy-network"
+      - "traefik.http.routers.${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback.rule=Host(`${SMART_VIEW_APP_APP_DOMAIN}`)"
+      - "traefik.http.routers.${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback.entrypoints=websecure"
+      - "traefik.http.routers.${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback.tls=true"
+      - "traefik.http.routers.${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback.priority=1"
+      - "traefik.http.routers.${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback.service=${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback"
+      - "traefik.http.services.${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback.loadbalancer.server.port=80"
+
+  web-green:
+    <<: *app-security
+    image: ${SMART_VIEW_APP_DOCKER_IMAGE_NAME}:${SMART_VIEW_APP_DOCKER_IMAGE_TAG_GREEN:-${SMART_VIEW_APP_DOCKER_IMAGE_TAG}}
+    container_name: ${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-web-green
+    restart: unless-stopped
+    stop_grace_period: 30s
+    volumes:
+      - ${SMART_VIEW_APP_DOCKER_STORAGE_VOLUME_PATH}:/var/www/html/storage:rw
+    networks:
+      - proxy-network
+    environment: *app-env
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-H", "Host: ${SMART_VIEW_APP_APP_DOMAIN}", "http://localhost:80/up"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy-network"
+      - "traefik.http.routers.${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback.rule=Host(`${SMART_VIEW_APP_APP_DOMAIN}`)"
+      - "traefik.http.routers.${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback.entrypoints=websecure"
+      - "traefik.http.routers.${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback.tls=true"
+      - "traefik.http.routers.${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback.priority=1"
+      - "traefik.http.routers.${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback.service=${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback"
+      - "traefik.http.services.${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-fallback.loadbalancer.server.port=80"
+
+  queue-worker:
+    <<: *app-security
+    image: ${SMART_VIEW_APP_DOCKER_IMAGE_NAME}:${SMART_VIEW_APP_DOCKER_IMAGE_TAG}
+    container_name: ${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-queue-worker
+    restart: unless-stopped
+    stop_grace_period: 30s
+    command: php artisan queue:work --tries=3 --verbose
+    volumes:
+      - ${SMART_VIEW_APP_DOCKER_STORAGE_VOLUME_PATH}:/var/www/html/storage:rw
+    networks:
+      - proxy-network
+    environment: *app-env
+    healthcheck:
+      disable: true
+
+  scheduler:
+    <<: *app-security
+    image: ${SMART_VIEW_APP_DOCKER_IMAGE_NAME}:${SMART_VIEW_APP_DOCKER_IMAGE_TAG}
+    container_name: ${SMART_VIEW_APP_DOCKER_CONTAINER_NAME}-scheduler
+    restart: unless-stopped
+    stop_grace_period: 30s
+    command: php artisan schedule:work --verbose
+    volumes:
+      - ${SMART_VIEW_APP_DOCKER_STORAGE_VOLUME_PATH}:/var/www/html/storage:rw
+    networks:
+      - proxy-network
+    environment: *app-env
+    healthcheck:
+      disable: true
+
+networks:
+  proxy-network:
+    external: true

@@ -23,7 +23,7 @@ class UsersSeeder extends Seeder
         ];
 
         if (config('app.env') === 'production' || config('app.env') === 'development') {
-            $users[0]['pasword'] = Str::random();
+            $users[0]['password'] = bcrypt(Str::random());
         }
 
         foreach ($users as $user) {

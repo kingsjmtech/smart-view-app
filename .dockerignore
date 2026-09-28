@@ -1,0 +1,55 @@
+# Git
+.git
+.gitattributes
+.gitignore
+
+# GitHub
+.github
+
+# IDE & Editor
+.idea
+.vscode
+.DS_Store
+
+# Laravel
+bootstrap/cache/*.php
+.env
+.env.*
+Homestead.json
+Homestead.yaml
+Makefile
+phpstan.neon
+phpunit.xml
+pint.json
+rector.php
+storage
+
+# Docker (Sail dev files, not used in production builds)
+docker
+compose.yaml
+docker-compose.yml
+docker-compose.deploy.yml
+
+# Deploy scripts (not needed in production image)
+scripts
+deploy-all.sh
+deploy-commands.sh
+deploy-dev.sh
+deploy-prod.sh
+
+# Node
+node_modules
+npm-debug.log
+yarn-error.log
+
+# Documentation & tests
+*.md
+.phpunit.cache
+coverage/
+tests
+
+# Secrets
+.infisical.json
+
+# Misc
+*.log
