@@ -1,10 +1,12 @@
 name: Laravel Pint Code Style
 
 on:
-  pull_request:
-    branches:
-      - development
-      - master
+  # Automatic triggers disabled. Run manually with workflow_dispatch.
+  # pull_request:
+  #   branches:
+  #     - development
+  #     - master
+  workflow_dispatch:
 
 jobs:
   laravel-pint:
