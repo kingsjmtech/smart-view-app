@@ -1,11 +1,13 @@
 name: Build and Deploy to Production
 
 on:
+  # Automatic triggers disabled. Run manually with workflow_dispatch.
 #  push:
 #    branches:
 #      - master
-  schedule:
-    - cron: '* * 1 1 *'
+  # schedule:
+  #   - cron: '* * 1 1 *'
+  workflow_dispatch:
 
 jobs:
   build-deploy-prod:
